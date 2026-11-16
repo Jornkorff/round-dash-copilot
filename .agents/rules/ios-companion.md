@@ -1,6 +1,6 @@
 ---
 trigger: glob
-globs: ["companion-ios/**"]
+globs: "companion-ios/**"
 ---
 
 # iOS Companion App Rules (Swift)

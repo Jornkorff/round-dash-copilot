@@ -1,6 +1,6 @@
 ---
 trigger: glob
-globs: ["firmware/**"]
+globs: "firmware/**"
 ---
 
 # Embedded Firmware Rules (ESP32 CYD & Waveshare S3)
