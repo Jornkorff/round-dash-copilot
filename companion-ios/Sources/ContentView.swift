@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ContentView: View {
     @ObservedObject var engine: MapVectorEngine
+    @ObservedObject var ble: BLEBroadcaster
 
     var body: some View {
         ZStack {
@@ -21,9 +22,9 @@ struct ContentView: View {
                     }
                     Spacer()
                     Circle()
-                        .fill(engine.ble.isConnected ? Color.green : Color.orange)
+                        .fill(ble.isConnected ? Color.green : Color.orange)
                         .frame(width: 12, height: 12)
-                        .shadow(color: engine.ble.isConnected ? .green : .orange, radius: 6)
+                        .shadow(color: ble.isConnected ? .green : .orange, radius: 6)
                 }
                 .padding(.horizontal)
                 .padding(.top, 16)
@@ -31,19 +32,19 @@ struct ContentView: View {
                 // BLE Status Card
                 VStack(spacing: 12) {
                     HStack {
-                        Image(systemName: engine.ble.isConnected ? "antenna.radiowaves.left.and.right" : "rays")
-                            .foregroundColor(engine.ble.isConnected ? .green : .orange)
+                        Image(systemName: ble.isConnected ? "antenna.radiowaves.left.and.right" : "rays")
+                            .foregroundColor(ble.isConnected ? .green : .orange)
                             .font(.system(size: 20))
-                        Text(engine.ble.peripheralName)
+                        Text(ble.peripheralName)
                             .font(.system(size: 15, weight: .semibold))
                             .foregroundColor(.white)
                         Spacer()
-                        Text(engine.ble.isConnected ? "LIVE" : "WAITING")
+                        Text(ble.isConnected ? "LIVE" : "WAITING")
                             .font(.system(size: 11, weight: .bold))
                             .padding(.horizontal, 8)
                             .padding(.vertical, 3)
-                            .background(engine.ble.isConnected ? Color.green.opacity(0.2) : Color.orange.opacity(0.2))
-                            .foregroundColor(engine.ble.isConnected ? .green : .orange)
+                            .background(ble.isConnected ? Color.green.opacity(0.2) : Color.orange.opacity(0.2))
+                            .foregroundColor(ble.isConnected ? .green : .orange)
                             .cornerRadius(6)
                     }
 
@@ -54,8 +55,8 @@ struct ContentView: View {
                             .font(.system(size: 13))
                             .foregroundColor(.gray)
                         Spacer()
-                        Text("\(engine.ble.packetsSent) pkts (~5 Hz)")
-                            .font(.system(size: 13, weight: .monospaced))
+                        Text("\(ble.packetsSent) pkts (~5 Hz)")
+                            .font(.system(size: 13, weight: .medium, design: .monospaced))
                             .foregroundColor(.cyan)
                     }
                 }
@@ -71,12 +72,14 @@ struct ContentView: View {
                             Text("Speed")
                                 .font(.system(size: 12, weight: .medium))
                                 .foregroundColor(.gray)
-                            Text("\(Int(engine.speedKmh))")
-                                .font(.system(size: 36, weight: .bold, design: .rounded))
-                                .foregroundColor(.white)
-                            + Text(" km/h")
-                                .font(.system(size: 14))
-                                .foregroundColor(.gray)
+                            HStack(alignment: .firstTextBaseline, spacing: 4) {
+                                Text("\(Int(engine.speedKmh))")
+                                    .font(.system(size: 36, weight: .bold, design: .rounded))
+                                    .foregroundColor(.white)
+                                Text("km/h")
+                                    .font(.system(size: 14))
+                                    .foregroundColor(.gray)
+                            }
                         }
                         Spacer()
                         VStack(alignment: .trailing) {

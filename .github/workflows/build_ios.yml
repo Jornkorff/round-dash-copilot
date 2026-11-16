@@ -23,15 +23,15 @@ jobs:
         working-directory: companion-ios
         run: xcodegen generate
 
-      - name: Build iOS Archive
+      - name: Build iOS App
         working-directory: companion-ios
         run: |
-          xcodebuild archive \
+          xcodebuild build \
             -project RoundDashCompanion.xcodeproj \
             -scheme RoundDashCompanion \
-            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
             -configuration Release \
-            -archivePath build/RoundDashCompanion.xcarchive \
+            -derivedDataPath build \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO
@@ -40,7 +40,7 @@ jobs:
         working-directory: companion-ios
         run: |
           mkdir -p Payload
-          cp -r build/RoundDashCompanion.xcarchive/Products/Applications/*.app Payload/
+          cp -r build/Build/Products/Release-iphoneos/RoundDashCompanion.app Payload/
           zip -r RoundDashCompanion.ipa Payload/
           rm -rf Payload
 

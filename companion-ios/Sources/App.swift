@@ -6,7 +6,7 @@ struct RoundDashCompanionApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView(engine: engine)
+            ContentView(engine: engine, ble: engine.ble)
         }
     }
 }

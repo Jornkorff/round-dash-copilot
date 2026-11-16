@@ -27,7 +27,9 @@ targets:
         NSBluetoothAlwaysUsageDescription: "RoundDash connects to your ESP32 dashboard display over Bluetooth Low Energy."
         NSBluetoothPeripheralUsageDescription: "RoundDash connects to your ESP32 dashboard display over Bluetooth Low Energy."
     settings:
-      CODE_SIGNING_ALLOWED: "NO"
-      CODE_SIGNING_REQUIRED: "NO"
-      CODE_SIGN_IDENTITY: ""
-      DEVELOPMENT_TEAM: ""
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.rounddash.copilot
+        CODE_SIGNING_ALLOWED: "NO"
+        CODE_SIGNING_REQUIRED: "NO"
+        CODE_SIGN_IDENTITY: ""
+        DEVELOPMENT_TEAM: ""
