@@ -49,7 +49,7 @@ public:
             cfg.offset_y         = 0;
             cfg.offset_rotation  = 0;
             cfg.readable         = true;
-            cfg.invert           = true;  // ST7789 CYD variants require display color inversion
+            cfg.invert           = false; // Set false so black background renders true deep black
             cfg.rgb_order        = false;
             cfg.dlen_16bit       = false;
             cfg.bus_shared       = true;
