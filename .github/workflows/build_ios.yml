@@ -1,0 +1,52 @@
+name: Build iOS Companion App
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build & Package iOS IPA
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode Project
+        working-directory: companion-ios
+        run: xcodegen generate
+
+      - name: Build iOS Archive
+        working-directory: companion-ios
+        run: |
+          xcodebuild archive \
+            -project RoundDashCompanion.xcodeproj \
+            -scheme RoundDashCompanion \
+            -sdk iphoneos \
+            -configuration Release \
+            -archivePath build/RoundDashCompanion.xcarchive \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Package Unsigned IPA
+        working-directory: companion-ios
+        run: |
+          mkdir -p Payload
+          cp -r build/RoundDashCompanion.xcarchive/Products/Applications/*.app Payload/
+          zip -r RoundDashCompanion.ipa Payload/
+          rm -rf Payload
+
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: RoundDashCompanion-IPA
+          path: companion-ios/RoundDashCompanion.ipa
+          retention-days: 14

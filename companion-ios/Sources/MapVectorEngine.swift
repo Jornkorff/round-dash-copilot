@@ -1,10 +1,18 @@
 import Foundation
 import CoreLocation
 
-final class MapVectorEngine: NSObject, CLLocationManagerDelegate {
+final class MapVectorEngine: NSObject, ObservableObject, CLLocationManagerDelegate {
+    let ble = BLEBroadcaster()
     private let locationManager = CLLocationManager()
-    private let ble = BLEBroadcaster()
     private var streamTimer: Timer?
+
+    @Published var speedKmh: Double = 0.0
+    @Published var headingDeg: Double = 0.0
+    @Published var latitude: Double = 0.0
+    @Published var longitude: Double = 0.0
+    @Published var activeRoadCount: Int = 0
+    @Published var activePoiCount: Int = 0
+    @Published var statusMessage: String = "Waiting for GPS fix..."
 
     private var latestLocation: CLLocation?
     private var cachedRoads: [(CLLocationCoordinate2D, CLLocationCoordinate2D, Bool)] = []
@@ -109,9 +117,20 @@ final class MapVectorEngine: NSObject, CLLocationManagerDelegate {
             pois: projectedPois
         )
         ble.sendFrame(packet)
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.speedKmh = max(0, loc.speed * 3.6)
+            self.headingDeg = heading
+            self.latitude = loc.coordinate.latitude
+            self.longitude = loc.coordinate.longitude
+            self.activeRoadCount = projectedRoads.count
+            self.activePoiCount = projectedPois.count
+        }
     }
 
     private func refreshNearbyVectors(around center: CLLocationCoordinate2D) async {
+        DispatchQueue.main.async { self.statusMessage = "Fetching OSM & NDW road vectors..." }
         async let osmResult = fetchOsmVectors(around: center)
         async let ndwResult = fetchNdwClosures(around: center)
 
@@ -124,6 +143,7 @@ final class MapVectorEngine: NSObject, CLLocationManagerDelegate {
         DispatchQueue.main.async {
             self.cachedRoads = mergedRoads
             self.cachedPois = mergedPois
+            self.statusMessage = "Live (\(mergedRoads.count) roads, \(mergedPois.count) POIs)"
         }
     }
 
