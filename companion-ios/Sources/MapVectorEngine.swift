@@ -1,6 +1,14 @@
 import Foundation
 import CoreLocation
 
+struct RawRoadSegment {
+    let start: CLLocationCoordinate2D
+    let end: CLLocationCoordinate2D
+    let wayId: Int64
+    let isClosed: Bool
+    let isMajor: Bool
+}
+
 final class MapVectorEngine: NSObject, ObservableObject, CLLocationManagerDelegate {
     let ble = BLEBroadcaster()
     private let locationManager = CLLocationManager()
@@ -12,12 +20,16 @@ final class MapVectorEngine: NSObject, ObservableObject, CLLocationManagerDelega
     @Published var longitude: Double = 0.0
     @Published var activeRoadCount: Int = 0
     @Published var activePoiCount: Int = 0
+    @Published var currentScaleCmPerPx: UInt16 = 90
+    @Published var previewRoads: [RoadSegment] = []
     @Published var statusMessage: String = "Waiting for GPS fix..."
 
     private var latestLocation: CLLocation?
-    private var cachedRoads: [(CLLocationCoordinate2D, CLLocationCoordinate2D, Bool)] = []
+    private var lastValidHeading: Double = 0.0
+    private var cachedRoads: [RawRoadSegment] = []
     private var cachedPois: [(CLLocationCoordinate2D, PoiType)] = []
     private var lastFetchLocation: CLLocation?
+    private var isFetching: Bool = false
 
     override init() {
         super.init()
@@ -28,8 +40,8 @@ final class MapVectorEngine: NSObject, ObservableObject, CLLocationManagerDelega
         locationManager.requestAlwaysAuthorization()
         locationManager.startUpdatingLocation()
 
-        // Stream 5 Hz car-relative vector frames over BLE
-        streamTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
+        // Stream 4 Hz car-relative vector frames over BLE
+        streamTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
             self?.emitFrame()
         }
     }
@@ -38,7 +50,11 @@ final class MapVectorEngine: NSObject, ObservableObject, CLLocationManagerDelega
         guard let loc = locations.last, loc.horizontalAccuracy >= 0 else { return }
         latestLocation = loc
 
-        if lastFetchLocation == nil || loc.distance(from: lastFetchLocation!) > 250 {
+        if loc.course >= 0 && loc.speed >= 1.0 {
+            lastValidHeading = loc.course
+        }
+
+        if !isFetching && (lastFetchLocation == nil || loc.distance(from: lastFetchLocation!) > 120 || cachedRoads.isEmpty) {
             lastFetchLocation = loc
             Task { await refreshNearbyVectors(around: loc.coordinate) }
         }
@@ -47,61 +63,115 @@ final class MapVectorEngine: NSObject, ObservableObject, CLLocationManagerDelega
     private func dynamicScaleCmPerPx(speedMps: Double) -> UInt16 {
         let kmh = max(0, speedMps * 3.6)
         switch kmh {
-        case ..<35:   return 100 // ~120m radius
-        case ..<65:   return 165 // ~200m radius
-        case ..<95:   return 290 // ~350m radius
-        default:      return 415 // ~500m radius
+        case ..<35:   return 90  // ~110m radius (clear game/car street minimap)
+        case ..<60:   return 130 // ~155m radius (city arterial)
+        case ..<90:   return 200 // ~240m radius (provincial road)
+        default:      return 300 // ~360m radius (motorway)
         }
     }
 
-    // Projects world lat/lon into car-relative meters (+Y = vehicle heading)
-    private func projectToCarMeters(origin: CLLocationCoordinate2D,
-                                    headingDeg: Double,
-                                    target: CLLocationCoordinate2D) -> (Int16, Int16) {
+    // Projects world lat/lon into car-relative decimeters (0.1m units, +Y = vehicle heading)
+    // Using 0.1m (10cm) units in Int16 preserves exact curve/roundabout shapes up to +-3,000m without angle-clipping
+    private func projectToCarDecimeters(origin: CLLocationCoordinate2D,
+                                        headingDeg: Double,
+                                        target: CLLocationCoordinate2D) -> (Int16, Int16) {
         let latScale = 111_320.0
         let lonScale = 111_320.0 * cos(origin.latitude * .pi / 180.0)
-        let east  = (target.longitude - origin.longitude) * lonScale
-        let north = (target.latitude  - origin.latitude)  * latScale
+        let eastMeters  = (target.longitude - origin.longitude) * lonScale
+        let northMeters = (target.latitude  - origin.latitude)  * latScale
 
         let rad = headingDeg * .pi / 180.0
-        let relX =  east * cos(rad) - north * sin(rad)
-        let relY =  east * sin(rad) + north * cos(rad)
+        let relX_dm = (eastMeters * cos(rad) - northMeters * sin(rad)) * 10.0
+        let relY_dm = (eastMeters * sin(rad) + northMeters * cos(rad)) * 10.0
 
-        let cx = Int16(max(-600, min(600, Int(relX.rounded()))))
-        let cy = Int16(max(-600, min(600, Int(relY.rounded()))))
+        let cx = Int16(max(-30000, min(30000, Int(relX_dm.rounded()))))
+        let cy = Int16(max(-30000, min(30000, Int(relY_dm.rounded()))))
         return (cx, cy)
+    }
+
+    // Point-to-segment squared distance (in decimeters^2) from car origin (0,0)
+    private func distSqToOrigin(x1: Int16, y1: Int16, x2: Int16, y2: Int16) -> Double {
+        let ax = Double(x1), ay = Double(y1)
+        let bx = Double(x2), by = Double(y2)
+        let dx = bx - ax, dy = by - ay
+        let lenSq = dx * dx + dy * dy
+        if lenSq < 1.0 {
+            return ax * ax + ay * ay
+        }
+        let t = max(0.0, min(1.0, -(ax * dx + ay * dy) / lenSq))
+        let px = ax + t * dx
+        let py = ay + t * dy
+        return px * px + py * py
     }
 
     private func emitFrame() {
         guard let loc = latestLocation else { return }
-        let heading = loc.course >= 0 ? loc.course : 0
+        let heading = (loc.course >= 0 && loc.speed >= 1.0) ? loc.course : lastValidHeading
         let scale = dynamicScaleCmPerPx(speedMps: loc.speed)
 
-        let projectedRoads: [RoadSegment] = cachedRoads.map { seg in
-            let p1 = projectToCarMeters(origin: loc.coordinate, headingDeg: heading, target: seg.0)
-            let p2 = projectToCarMeters(origin: loc.coordinate, headingDeg: heading, target: seg.1)
-            return RoadSegment(x1: p1.0, y1: p1.1, x2: p2.0, y2: p2.1, flags: seg.2 ? 0x02 : 0x00)
+        // Maximum visible distance from car in decimeters (165 px * scale_cm_per_px / 10 cm_per_dm)
+        let maxVisibleDm = Double(scale) * 18.0
+        let maxVisibleDistSq = maxVisibleDm * maxVisibleDm
+
+        struct ProjectedWithMeta {
+            var seg: RoadSegment
+            let wayId: Int64
+            let distSq: Double
         }
 
+        var items: [ProjectedWithMeta] = []
+        items.reserveCapacity(cachedRoads.count)
+
+        for raw in cachedRoads {
+            let p1 = projectToCarDecimeters(origin: loc.coordinate, headingDeg: heading, target: raw.start)
+            let p2 = projectToCarDecimeters(origin: loc.coordinate, headingDeg: heading, target: raw.end)
+            let dsq = distSqToOrigin(x1: p1.0, y1: p1.1, x2: p2.0, y2: p2.1)
+            if dsq <= maxVisibleDistSq {
+                var flags: UInt8 = 0
+                if raw.isClosed { flags |= 0x02 }
+                if raw.isMajor  { flags |= 0x04 }
+                items.append(ProjectedWithMeta(
+                    seg: RoadSegment(x1: p1.0, y1: p1.1, x2: p2.0, y2: p2.1, flags: flags),
+                    wayId: raw.wayId,
+                    distSq: dsq
+                ))
+            }
+        }
+
+        // Sort by closest distance to the vehicle (0,0) so the nearest 140 road segments are streamed
+        items.sort { $0.distSq < $1.distSq }
+
+        // Highlight all segments belonging to the current street (closest wayId to the car)
+        if let currentWayId = items.first?.wayId, currentWayId != 0 {
+            for i in items.indices {
+                if items[i].wayId == currentWayId && (items[i].seg.flags & 0x02 == 0) {
+                    items[i].seg.flags |= 0x01
+                }
+            }
+        }
+
+        let projectedRoads = Array(items.prefix(BinaryFrameBuilder.maxTotalRoads)).map { $0.seg }
+
         let projectedPois: [PoiItem] = cachedPois
-            .sorted { $0.1.rawValue < $1.1.rawValue }
             .map { poi in
-                let pt = projectToCarMeters(origin: loc.coordinate, headingDeg: heading, target: poi.0)
+                let pt = projectToCarDecimeters(origin: loc.coordinate, headingDeg: heading, target: poi.0)
                 return PoiItem(x: pt.0, y: pt.1, poiType: poi.1)
             }
+            .sorted { a, b in
+                let da = Double(a.x) * Double(a.x) + Double(a.y) * Double(a.y)
+                let db = Double(b.x) * Double(b.x) + Double(b.y) * Double(b.y)
+                return da < db
+            }
 
-        // Active Alert Evaluation based on 4-Tier Hierarchy:
-        // P1: Speed Cam ahead (forward lookahead 0..350m, within +/-50m corridor)
-        // P3: Closure/Roadworks ahead (forward lookahead 0..300m, within +/-40m corridor)
         var activeAlert: AlertTier = .none
         let hasSpeedCamAhead = projectedPois.contains { poi in
             (poi.poiType == .fixedCam || poi.poiType == .mobileTrap || poi.poiType == .trajectcontrole) &&
-            poi.y > 0 && poi.y < 350 && abs(poi.x) < 50
+            poi.y > 0 && poi.y < 3500 && abs(poi.x) < 500
         }
         let hasClosureAhead = projectedRoads.contains { r in
-            (r.flags & 0x02 != 0) && ((r.y1 > 0 && r.y1 < 300) || (r.y2 > 0 && r.y2 < 300))
+            (r.flags & 0x02 != 0) && ((r.y1 > 0 && r.y1 < 3000) || (r.y2 > 0 && r.y2 < 3000))
         } || projectedPois.contains { poi in
-            poi.poiType == .closureHazard && poi.y > 0 && poi.y < 300 && abs(poi.x) < 50
+            poi.poiType == .closureHazard && poi.y > 0 && poi.y < 3000 && abs(poi.x) < 500
         }
 
         if hasSpeedCamAhead {
@@ -110,13 +180,15 @@ final class MapVectorEngine: NSObject, ObservableObject, CLLocationManagerDelega
             activeAlert = .hazard
         }
 
-        let packet = BinaryFrameBuilder.build(
+        let packets = BinaryFrameBuilder.buildChunks(
             scaleCmPerPx: scale,
             alert: activeAlert,
             roads: projectedRoads,
             pois: projectedPois
         )
-        ble.sendFrame(packet)
+        for pkt in packets {
+            ble.sendFrame(pkt)
+        }
 
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
@@ -125,12 +197,17 @@ final class MapVectorEngine: NSObject, ObservableObject, CLLocationManagerDelega
             self.latitude = loc.coordinate.latitude
             self.longitude = loc.coordinate.longitude
             self.activeRoadCount = projectedRoads.count
-            self.activePoiCount = projectedPois.count
+            self.activePoiCount = min(projectedPois.count, BinaryFrameBuilder.maxPois)
+            self.currentScaleCmPerPx = scale
+            self.previewRoads = projectedRoads
         }
     }
 
     private func refreshNearbyVectors(around center: CLLocationCoordinate2D) async {
-        DispatchQueue.main.async { self.statusMessage = "Fetching OSM & NDW road vectors..." }
+        DispatchQueue.main.async {
+            self.isFetching = true
+            self.statusMessage = "Fetching OSM & NDW road vectors..."
+        }
         async let osmResult = fetchOsmVectors(around: center)
         async let ndwResult = fetchNdwClosures(around: center)
 
@@ -141,82 +218,110 @@ final class MapVectorEngine: NSObject, ObservableObject, CLLocationManagerDelega
         let mergedPois = osmPois + ndwPois
 
         DispatchQueue.main.async {
-            self.cachedRoads = mergedRoads
-            self.cachedPois = mergedPois
-            self.statusMessage = "Live (\(mergedRoads.count) roads, \(mergedPois.count) POIs)"
+            self.isFetching = false
+            if !mergedRoads.isEmpty {
+                self.cachedRoads = mergedRoads
+                self.cachedPois = mergedPois
+                self.statusMessage = "Live (\(mergedRoads.count) road segments, \(mergedPois.count) POIs)"
+            } else if self.cachedRoads.isEmpty {
+                self.statusMessage = "Retrying OSM road fetch..."
+            }
         }
     }
 
-    // Queries OpenStreetMap Overpass API within 600m for roads, cameras, fuel, garages, EV chargers, parking
-    private func fetchOsmVectors(around center: CLLocationCoordinate2D) async -> ([(CLLocationCoordinate2D, CLLocationCoordinate2D, Bool)], [(CLLocationCoordinate2D, PoiType)]) {
+    // Queries OpenStreetMap Overpass API within 350m for all drivable Dutch street classes + POIs
+    private func fetchOsmVectors(around center: CLLocationCoordinate2D) async -> ([RawRoadSegment], [(CLLocationCoordinate2D, PoiType)]) {
         let query = """
         [out:json][timeout:10];
         (
-          way["highway"~"motorway|trunk|primary|secondary|tertiary|residential"](around:600,\(center.latitude),\(center.longitude));
-          node["highway"="speed_camera"](around:600,\(center.latitude),\(center.longitude));
-          node["amenity"="fuel"](around:600,\(center.latitude),\(center.longitude));
-          node["amenity"="charging_station"](around:600,\(center.latitude),\(center.longitude));
-          node["shop"="car_repair"](around:600,\(center.latitude),\(center.longitude));
-          node["amenity"="parking"](around:600,\(center.latitude),\(center.longitude));
+          way["highway"~"^(motorway|motorway_link|trunk|trunk_link|primary|primary_link|secondary|secondary_link|tertiary|tertiary_link|unclassified|residential|living_street)$"](around:350,\(center.latitude),\(center.longitude));
+          node["highway"="speed_camera"](around:500,\(center.latitude),\(center.longitude));
+          node["amenity"="fuel"](around:500,\(center.latitude),\(center.longitude));
+          node["amenity"="charging_station"](around:500,\(center.latitude),\(center.longitude));
+          node["shop"="car_repair"](around:500,\(center.latitude),\(center.longitude));
+          node["amenity"="parking"](around:500,\(center.latitude),\(center.longitude));
         );
         out body geom;
         """
-        guard let url = URL(string: "https://overpass-api.de/api/interpreter"),
-              let body = "data=\(query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "")".data(using: .utf8) else {
-            return ([], [])
-        }
 
-        var req = URLRequest(url: url)
-        req.httpMethod = "POST"
-        req.httpBody = body
+        let endpoints = [
+            "https://overpass-api.de/api/interpreter",
+            "https://overpass.kumi.systems/api/interpreter",
+            "https://maps.mail.ru/osm/tools/overpass/api/interpreter"
+        ]
 
-        do {
-            let (data, _) = try await URLSession.shared.data(for: req)
-            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let elements = json["elements"] as? [[String: Any]] else { return ([], []) }
+        for endpoint in endpoints {
+            guard let url = URL(string: endpoint),
+                  let body = "data=\(query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "")".data(using: .utf8) else {
+                continue
+            }
 
-            var newRoads: [(CLLocationCoordinate2D, CLLocationCoordinate2D, Bool)] = []
-            var newPois: [(CLLocationCoordinate2D, PoiType)] = []
+            var req = URLRequest(url: url)
+            req.httpMethod = "POST"
+            req.httpBody = body
+            req.timeoutInterval = 8
+            req.setValue("RoundDashCopilot/1.0", forHTTPHeaderField: "User-Agent")
 
-            for el in elements {
-                let type = el["type"] as? String
-                let tags = el["tags"] as? [String: String] ?? [:]
+            do {
+                let (data, resp) = try await URLSession.shared.data(for: req)
+                guard let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode),
+                      let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let elements = json["elements"] as? [[String: Any]] else { continue }
 
-                if type == "node", let lat = el["lat"] as? Double, let lon = el["lon"] as? Double {
-                    let coord = CLLocationCoordinate2D(latitude: lat, longitude: lon)
-                    if tags["highway"] == "speed_camera" {
-                        newPois.append((coord, .fixedCam))
-                    } else if tags["amenity"] == "fuel" {
-                        newPois.append((coord, .gasStation))
-                    } else if tags["amenity"] == "charging_station" {
-                        newPois.append((coord, .evCharger))
-                    } else if tags["shop"] == "car_repair" || tags["amenity"] == "car_repair" {
-                        newPois.append((coord, .garage))
-                    } else if tags["amenity"] == "parking" {
-                        newPois.append((coord, .parking))
-                    }
-                } else if type == "way", let geom = el["geometry"] as? [[String: Double]] {
-                    for idx in 0..<max(0, geom.count - 1) {
-                        if let lat1 = geom[idx]["lat"], let lon1 = geom[idx]["lon"],
-                           let lat2 = geom[idx + 1]["lat"], let lon2 = geom[idx + 1]["lon"] {
-                            newRoads.append((
-                                CLLocationCoordinate2D(latitude: lat1, longitude: lon1),
-                                CLLocationCoordinate2D(latitude: lat2, longitude: lon2),
-                                false
-                            ))
+                var newRoads: [RawRoadSegment] = []
+                var newPois: [(CLLocationCoordinate2D, PoiType)] = []
+
+                for el in elements {
+                    let type = el["type"] as? String
+                    let tags = el["tags"] as? [String: String] ?? [:]
+
+                    if type == "node", let lat = el["lat"] as? Double, let lon = el["lon"] as? Double {
+                        let coord = CLLocationCoordinate2D(latitude: lat, longitude: lon)
+                        if tags["highway"] == "speed_camera" {
+                            newPois.append((coord, .fixedCam))
+                        } else if tags["amenity"] == "fuel" {
+                            newPois.append((coord, .gasStation))
+                        } else if tags["amenity"] == "charging_station" {
+                            newPois.append((coord, .evCharger))
+                        } else if tags["shop"] == "car_repair" || tags["amenity"] == "car_repair" {
+                            newPois.append((coord, .garage))
+                        } else if tags["amenity"] == "parking" {
+                            newPois.append((coord, .parking))
+                        }
+                    } else if type == "way", let geom = el["geometry"] as? [[String: Double]] {
+                        let wayId = (el["id"] as? Int64) ?? Int64((el["id"] as? Int) ?? 0)
+                        let hw = tags["highway"] ?? ""
+                        let isMajor = hw.hasPrefix("motorway") || hw.hasPrefix("trunk") ||
+                                      hw.hasPrefix("primary")  || hw.hasPrefix("secondary") ||
+                                      hw.hasPrefix("tertiary")
+
+                        for idx in 0..<max(0, geom.count - 1) {
+                            if let lat1 = geom[idx]["lat"], let lon1 = geom[idx]["lon"],
+                               let lat2 = geom[idx + 1]["lat"], let lon2 = geom[idx + 1]["lon"] {
+                                newRoads.append(RawRoadSegment(
+                                    start: CLLocationCoordinate2D(latitude: lat1, longitude: lon1),
+                                    end: CLLocationCoordinate2D(latitude: lat2, longitude: lon2),
+                                    wayId: wayId,
+                                    isClosed: false,
+                                    isMajor: isMajor
+                                ))
+                            }
                         }
                     }
                 }
+
+                if !newRoads.isEmpty {
+                    return (newRoads, newPois)
+                }
+            } catch {
+                continue
             }
-            return (newRoads, newPois)
-        } catch {
-            return ([], [])
         }
+        return ([], [])
     }
 
     /// Fetches live road closures, roadworks, and traffic events from Dutch NDW Open Data (opendata.ndw.nu)
-    private func fetchNdwClosures(around center: CLLocationCoordinate2D) async -> ([(CLLocationCoordinate2D, CLLocationCoordinate2D, Bool)], [(CLLocationCoordinate2D, PoiType)]) {
-        // NDW live roadworks and traffic events open data feed URL
+    private func fetchNdwClosures(around center: CLLocationCoordinate2D) async -> ([RawRoadSegment], [(CLLocationCoordinate2D, PoiType)]) {
         guard let url = URL(string: "https://opendata.ndw.nu/gebeurtenissen.geojson") else {
             return ([], [])
         }
@@ -228,26 +333,21 @@ final class MapVectorEngine: NSObject, ObservableObject, CLLocationManagerDelega
 
         do {
             let (data, response) = try await URLSession.shared.data(for: req)
-            guard let httpResp = response as? HTTPURLResponse, (200...299).contains(httpResp.statusCode) else {
+            guard let httpResp = response as? HTTPURLResponse, (200...299).contains(httpResp.statusCode),
+                  let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                 return ([], [])
             }
 
-            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                return ([], [])
-            }
-
-            var ndwRoads: [(CLLocationCoordinate2D, CLLocationCoordinate2D, Bool)] = []
+            var ndwRoads: [RawRoadSegment] = []
             var ndwPois: [(CLLocationCoordinate2D, PoiType)] = []
             let centerLoc = CLLocation(latitude: center.latitude, longitude: center.longitude)
 
-            // Support GeoJSON FeatureCollection format (used by NDW OTM / GeoJSON export)
             if let features = json["features"] as? [[String: Any]] {
                 for feat in features {
                     let props = feat["properties"] as? [String: Any] ?? [:]
                     let geom = feat["geometry"] as? [String: Any] ?? [:]
                     let geomType = geom["type"] as? String
 
-                    // Check for road closure or roadwork keywords in properties
                     let situationType = (props["type"] as? String ?? "").lowercased()
                     let situationDesc = (props["description"] as? String ?? "").lowercased()
                     let isClosure = situationType.contains("close") || situationType.contains("afsluit") ||
@@ -257,7 +357,7 @@ final class MapVectorEngine: NSObject, ObservableObject, CLLocationManagerDelega
                     if geomType == "Point", let coords = geom["coordinates"] as? [Double], coords.count >= 2 {
                         let ptCoord = CLLocationCoordinate2D(latitude: coords[1], longitude: coords[0])
                         let ptLoc = CLLocation(latitude: ptCoord.latitude, longitude: ptCoord.longitude)
-                        if centerLoc.distance(from: ptLoc) <= 600 {
+                        if centerLoc.distance(from: ptLoc) <= 500 {
                             ndwPois.append((ptCoord, .closureHazard))
                         }
                     } else if geomType == "LineString", let coords = geom["coordinates"] as? [[Double]] {
@@ -268,26 +368,20 @@ final class MapVectorEngine: NSObject, ObservableObject, CLLocationManagerDelega
                                 let coord1 = CLLocationCoordinate2D(latitude: c1[1], longitude: c1[0])
                                 let coord2 = CLLocationCoordinate2D(latitude: c2[1], longitude: c2[0])
                                 let pLoc = CLLocation(latitude: coord1.latitude, longitude: coord1.longitude)
-                                if centerLoc.distance(from: pLoc) <= 600 {
-                                    ndwRoads.append((coord1, coord2, isClosure))
+                                if centerLoc.distance(from: pLoc) <= 500 {
+                                    ndwRoads.append(RawRoadSegment(
+                                        start: coord1,
+                                        end: coord2,
+                                        wayId: -1,
+                                        isClosed: isClosure,
+                                        isMajor: false
+                                    ))
                                 }
                             }
                         }
                     }
                 }
-            } else if let events = json["events"] as? [[String: Any]] {
-                // Support direct OTM (OpenTripModel) events format
-                for ev in events {
-                    if let loc = ev["location"] as? [String: Double],
-                       let lat = loc["latitude"], let lon = loc["longitude"] {
-                        let coord = CLLocationCoordinate2D(latitude: lat, longitude: lon)
-                        if centerLoc.distance(from: CLLocation(latitude: lat, longitude: lon)) <= 600 {
-                            ndwPois.append((coord, .closureHazard))
-                        }
-                    }
-                }
             }
-
             return (ndwRoads, ndwPois)
         } catch {
             return ([], [])

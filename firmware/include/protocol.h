@@ -4,7 +4,7 @@
 #define MAP_SERVICE_UUID        "4FAFC201-1FB5-459E-8FCC-C5C9C331914B"
 #define MAP_FRAME_CHAR_UUID     "BEB5483E-36E1-4688-B7F5-EA07361B26A8"
 
-#define MAX_ROAD_SEGMENTS       32
+#define MAX_ROAD_SEGMENTS       160
 #define MAX_POIS                16
 
 enum AlertTier : uint8_t {
@@ -27,14 +27,25 @@ enum PoiType : uint8_t {
 
 enum RoadFlags : uint8_t {
     ROAD_FLAG_CURRENT = 1 << 0,
-    ROAD_FLAG_CLOSED  = 1 << 1
+    ROAD_FLAG_CLOSED  = 1 << 1,
+    ROAD_FLAG_MAJOR   = 1 << 2
 };
 
 #pragma pack(push, 1)
 struct FrameHeader {
-    uint8_t  msg_type;          // 0x01 = Map Frame
+    uint8_t  msg_type;          // 0x01 = Single-Packet Map Frame
     uint16_t scale_cm_per_px;   // Dynamic zoom factor from iPhone speed
     uint8_t  active_alert_type; // AlertTier enum
+    uint8_t  road_count;
+    uint8_t  poi_count;
+};
+
+struct ChunkedFrameHeader {
+    uint8_t  msg_type;          // 0x02 = Multi-Chunk Map Frame (up to 160 road segments)
+    uint16_t scale_cm_per_px;
+    uint8_t  active_alert_type;
+    uint8_t  chunk_idx;
+    uint8_t  total_chunks;
     uint8_t  road_count;
     uint8_t  poi_count;
 };

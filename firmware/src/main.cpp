@@ -26,12 +26,11 @@ static lv_color_t buf1[SCREEN_WIDTH * 20];
 
 // UI Objects
 static lv_obj_t* circle_viewport = nullptr;
-static lv_obj_t* road_lines[MAX_ROAD_SEGMENTS];
-static lv_point_t road_points[MAX_ROAD_SEGMENTS][2];
 static lv_obj_t* poi_markers[MAX_POIS];
 static lv_obj_t* poi_icons[MAX_POIS];
+static lv_obj_t* car_shadow = nullptr;
 static lv_obj_t* car_icon = nullptr;
-static lv_point_t car_points[4];
+static lv_point_t car_points[5];
 static lv_obj_t* alert_badge = nullptr;
 static lv_obj_t* alert_badge_icon = nullptr;
 
@@ -42,15 +41,22 @@ static lv_obj_t* debug_label = nullptr;
 // Shared State
 static volatile bool ble_connected = false;
 static volatile bool frame_dirty = false;
+static volatile bool coords_in_decimeters = false;
 static uint32_t rx_packets = 0;
 
-static uint16_t current_scale_cm_px = 165;
+static uint16_t current_scale_cm_px = 120;
 static uint8_t incoming_alert = ALERT_NONE;
 static uint8_t dismissed_alert = ALERT_NONE;
 static uint8_t active_road_count = 0;
 static uint8_t active_poi_count = 0;
 static RoadSegment roads[MAX_ROAD_SEGMENTS];
 static PoiItem pois[MAX_POIS];
+
+// Staging buffer for multi-chunk BLE map frames (msg_type 0x02)
+static uint8_t staging_road_count = 0;
+static uint8_t staging_poi_count = 0;
+static RoadSegment staging_roads[MAX_ROAD_SEGMENTS];
+static PoiItem staging_pois[MAX_POIS];
 
 // Car anchor inside 240x240 circle (offset down for forward look-ahead)
 static constexpr int CAR_CENTER_X = 120;
@@ -308,43 +314,96 @@ static int custom_gap_event(struct ble_gap_event *event, void *arg) {
     return 0;
 }
 
-// BLE GATT Frame Receiver
+// BLE GATT Frame Receiver (Supports 0x01 Single-Frame and 0x02 Multi-Chunk 160-Road Frame)
 class MapFrameCallbacks : public NimBLECharacteristicCallbacks {
     void onWrite(NimBLECharacteristic* pCharacteristic) override {
         std::string val = pCharacteristic->getValue();
-        if (val.size() < sizeof(FrameHeader)) return;
+        if (val.empty()) return;
 
         const uint8_t* ptr = reinterpret_cast<const uint8_t*>(val.data());
-        FrameHeader hdr;
-        memcpy(&hdr, ptr, sizeof(FrameHeader));
-        if (hdr.msg_type != 0x01) return;
+        uint8_t msg_type = ptr[0];
 
-        uint8_t r_cnt = min<uint8_t>(hdr.road_count, MAX_ROAD_SEGMENTS);
-        uint8_t p_cnt = min<uint8_t>(hdr.poi_count, MAX_POIS);
-        size_t expected_len = sizeof(FrameHeader) + r_cnt * sizeof(RoadSegment) + p_cnt * sizeof(PoiItem);
-        if (val.size() < expected_len) return;
+        if (msg_type == 0x01) {
+            if (val.size() < sizeof(FrameHeader)) return;
+            FrameHeader hdr;
+            memcpy(&hdr, ptr, sizeof(FrameHeader));
 
-        current_scale_cm_px = max<uint16_t>(hdr.scale_cm_per_px, 20);
-        if (hdr.active_alert_type != incoming_alert) {
-            incoming_alert = hdr.active_alert_type;
-            if (incoming_alert == ALERT_NONE) {
-                dismissed_alert = ALERT_NONE;
+            uint8_t r_cnt = min<uint8_t>(hdr.road_count, MAX_ROAD_SEGMENTS);
+            uint8_t p_cnt = min<uint8_t>(hdr.poi_count, MAX_POIS);
+            size_t expected_len = sizeof(FrameHeader) + r_cnt * sizeof(RoadSegment) + p_cnt * sizeof(PoiItem);
+            if (val.size() < expected_len) return;
+
+            current_scale_cm_px = max<uint16_t>(hdr.scale_cm_per_px, 20);
+            if (hdr.active_alert_type != incoming_alert) {
+                incoming_alert = hdr.active_alert_type;
+                if (incoming_alert == ALERT_NONE) {
+                    dismissed_alert = ALERT_NONE;
+                }
+            }
+
+            const uint8_t* body = ptr + sizeof(FrameHeader);
+            if (r_cnt > 0) {
+                memcpy(roads, body, r_cnt * sizeof(RoadSegment));
+                body += r_cnt * sizeof(RoadSegment);
+            }
+            if (p_cnt > 0) {
+                memcpy(pois, body, p_cnt * sizeof(PoiItem));
+            }
+
+            active_road_count = r_cnt;
+            active_poi_count = p_cnt;
+            coords_in_decimeters = false;
+            rx_packets = rx_packets + 1;
+            frame_dirty = true;
+        } else if (msg_type == 0x02) {
+            if (val.size() < sizeof(ChunkedFrameHeader)) return;
+            ChunkedFrameHeader hdr;
+            memcpy(&hdr, ptr, sizeof(ChunkedFrameHeader));
+
+            uint8_t r_cnt = hdr.road_count;
+            uint8_t p_cnt = min<uint8_t>(hdr.poi_count, MAX_POIS);
+            size_t expected_len = sizeof(ChunkedFrameHeader) + r_cnt * sizeof(RoadSegment) + p_cnt * sizeof(PoiItem);
+            if (val.size() < expected_len) return;
+
+            if (hdr.chunk_idx == 0) {
+                staging_road_count = 0;
+                staging_poi_count = 0;
+            }
+
+            const uint8_t* body = ptr + sizeof(ChunkedFrameHeader);
+            uint8_t space_left = (staging_road_count < MAX_ROAD_SEGMENTS) ? (MAX_ROAD_SEGMENTS - staging_road_count) : 0;
+            uint8_t to_copy = min<uint8_t>(r_cnt, space_left);
+            if (to_copy > 0) {
+                memcpy(&staging_roads[staging_road_count], body, to_copy * sizeof(RoadSegment));
+                staging_road_count += to_copy;
+            }
+            body += r_cnt * sizeof(RoadSegment);
+
+            if (p_cnt > 0) {
+                memcpy(staging_pois, body, p_cnt * sizeof(PoiItem));
+                staging_poi_count = p_cnt;
+            }
+
+            rx_packets = rx_packets + 1;
+
+            if (hdr.chunk_idx + 1 >= hdr.total_chunks) {
+                current_scale_cm_px = max<uint16_t>(hdr.scale_cm_per_px, 20);
+                if (hdr.active_alert_type != incoming_alert) {
+                    incoming_alert = hdr.active_alert_type;
+                    if (incoming_alert == ALERT_NONE) {
+                        dismissed_alert = ALERT_NONE;
+                    }
+                }
+                memcpy(roads, staging_roads, staging_road_count * sizeof(RoadSegment));
+                active_road_count = staging_road_count;
+                if (staging_poi_count > 0 || hdr.chunk_idx == 0) {
+                    memcpy(pois, staging_pois, staging_poi_count * sizeof(PoiItem));
+                    active_poi_count = staging_poi_count;
+                }
+                coords_in_decimeters = true;
+                frame_dirty = true;
             }
         }
-
-        const uint8_t* body = ptr + sizeof(FrameHeader);
-        if (r_cnt > 0) {
-            memcpy(roads, body, r_cnt * sizeof(RoadSegment));
-            body += r_cnt * sizeof(RoadSegment);
-        }
-        if (p_cnt > 0) {
-            memcpy(pois, body, p_cnt * sizeof(PoiItem));
-        }
-
-        active_road_count = r_cnt;
-        active_poi_count = p_cnt;
-        rx_packets = rx_packets + 1;
-        frame_dirty = true;
     }
 };
 
@@ -381,47 +440,165 @@ class ServerCallbacks : public NimBLEServerCallbacks {
     }
 };
 
-static inline lv_coord_t meters_to_px_x(int16_t mx) {
-    int32_t cm = static_cast<int32_t>(mx) * 100;
-    return static_cast<lv_coord_t>(CAR_CENTER_X + (cm / current_scale_cm_px));
+static uint16_t render_scale_cm_px = 90;
+static int16_t legacy_offset_x = 0;
+static int16_t legacy_offset_y = 0;
+
+static inline lv_coord_t coord_to_px_x(int16_t val) {
+    int32_t cm = coords_in_decimeters
+        ? (static_cast<int32_t>(val) * 10)
+        : (static_cast<int32_t>(val - legacy_offset_x) * 100);
+    return static_cast<lv_coord_t>(CAR_CENTER_X + (cm / render_scale_cm_px));
 }
 
-static inline lv_coord_t meters_to_px_y(int16_t my) {
-    int32_t cm = static_cast<int32_t>(my) * 100;
-    return static_cast<lv_coord_t>(CAR_CENTER_Y - (cm / current_scale_cm_px));
+static inline lv_coord_t coord_to_px_y(int16_t val) {
+    int32_t cm = coords_in_decimeters
+        ? (static_cast<int32_t>(val) * 10)
+        : (static_cast<int32_t>(val - legacy_offset_y) * 100);
+    return static_cast<lv_coord_t>(CAR_CENTER_Y - (cm / render_scale_cm_px));
+}
+
+// Custom 3-Pass Automotive / Game Minimap Road Renderer (Casing + Paved Surface + Active Route)
+static void on_viewport_draw(lv_event_t* e) {
+    lv_obj_t* obj = lv_event_get_target(e);
+    lv_draw_ctx_t* draw_ctx = lv_event_get_draw_ctx(e);
+    if (!draw_ctx || active_road_count == 0) return;
+
+    lv_area_t vp;
+    lv_obj_get_coords(obj, &vp);
+
+    // Find closest road to (0,0) if none explicitly flagged as current
+    int closest_idx = -1;
+    int64_t best_dsq = 0x7FFFFFFFFFFFFFFFLL;
+    bool has_explicit_current = false;
+    for (uint8_t i = 0; i < active_road_count; i++) {
+        if (roads[i].flags & ROAD_FLAG_CURRENT) has_explicit_current = true;
+        int64_t mx = (static_cast<int64_t>(roads[i].x1) + roads[i].x2) / 2;
+        int64_t my = (static_cast<int64_t>(roads[i].y1) + roads[i].y2) / 2;
+        int64_t dsq = mx * mx + my * my;
+        if (dsq < best_dsq) {
+            best_dsq = dsq;
+            closest_idx = i;
+        }
+    }
+
+    lv_draw_line_dsc_t line_dsc;
+    lv_draw_line_dsc_init(&line_dsc);
+    line_dsc.round_start = 1;
+    line_dsc.round_end = 1;
+    line_dsc.opa = LV_OPA_COVER;
+
+    // Pass 1: Pure Black Road Casing / Outline (gives every street razor-sharp borders & merges intersections)
+    line_dsc.color = lv_color_hex(0x000000);
+    for (uint8_t i = 0; i < active_road_count; i++) {
+        lv_point_t p1 = {
+            static_cast<lv_coord_t>(vp.x1 + coord_to_px_x(roads[i].x1)),
+            static_cast<lv_coord_t>(vp.y1 + coord_to_px_y(roads[i].y1))
+        };
+        lv_point_t p2 = {
+            static_cast<lv_coord_t>(vp.x1 + coord_to_px_x(roads[i].x2)),
+            static_cast<lv_coord_t>(vp.y1 + coord_to_px_y(roads[i].y2))
+        };
+        if (max(p1.x, p2.x) < vp.x1 - 12 || min(p1.x, p2.x) > vp.x2 + 12 ||
+            max(p1.y, p2.y) < vp.y1 - 12 || min(p1.y, p2.y) > vp.y2 + 12) continue;
+
+        bool is_major = (roads[i].flags & ROAD_FLAG_MAJOR) != 0;
+        bool is_cur = (roads[i].flags & ROAD_FLAG_CURRENT) || (!has_explicit_current && i == closest_idx);
+        line_dsc.width = (is_major || is_cur) ? 10 : 8;
+        lv_draw_line(draw_ctx, &line_dsc, &p1, &p2);
+    }
+
+    // Pass 2: High-Contrast Paved Street Surface (Residential & Major Roads)
+    for (uint8_t i = 0; i < active_road_count; i++) {
+        bool is_cur = (roads[i].flags & ROAD_FLAG_CURRENT) || (!has_explicit_current && i == closest_idx);
+        bool is_closed = (roads[i].flags & ROAD_FLAG_CLOSED) != 0;
+        if (is_cur || is_closed) continue;
+
+        lv_point_t p1 = {
+            static_cast<lv_coord_t>(vp.x1 + coord_to_px_x(roads[i].x1)),
+            static_cast<lv_coord_t>(vp.y1 + coord_to_px_y(roads[i].y1))
+        };
+        lv_point_t p2 = {
+            static_cast<lv_coord_t>(vp.x1 + coord_to_px_x(roads[i].x2)),
+            static_cast<lv_coord_t>(vp.y1 + coord_to_px_y(roads[i].y2))
+        };
+        if (max(p1.x, p2.x) < vp.x1 - 12 || min(p1.x, p2.x) > vp.x2 + 12 ||
+            max(p1.y, p2.y) < vp.y1 - 12 || min(p1.y, p2.y) > vp.y2 + 12) continue;
+
+        if (roads[i].flags & ROAD_FLAG_MAJOR) {
+            line_dsc.color = lv_color_hex(0xE2E8F0); // Bright Alabaster Arterial Road
+            line_dsc.width = 7;
+        } else {
+            line_dsc.color = lv_color_hex(0x94A3B8); // Crisp Silver-Slate Residential Street
+            line_dsc.width = 5;
+        }
+        lv_draw_line(draw_ctx, &line_dsc, &p1, &p2);
+    }
+
+    // Pass 3: Active Current Road (Electric Cyan) & Closed Roads (Crimson) on top
+    for (uint8_t i = 0; i < active_road_count; i++) {
+        bool is_cur = (roads[i].flags & ROAD_FLAG_CURRENT) || (!has_explicit_current && i == closest_idx);
+        bool is_closed = (roads[i].flags & ROAD_FLAG_CLOSED) != 0;
+        if (!is_cur && !is_closed) continue;
+
+        lv_point_t p1 = {
+            static_cast<lv_coord_t>(vp.x1 + coord_to_px_x(roads[i].x1)),
+            static_cast<lv_coord_t>(vp.y1 + coord_to_px_y(roads[i].y1))
+        };
+        lv_point_t p2 = {
+            static_cast<lv_coord_t>(vp.x1 + coord_to_px_x(roads[i].x2)),
+            static_cast<lv_coord_t>(vp.y1 + coord_to_px_y(roads[i].y2))
+        };
+        if (max(p1.x, p2.x) < vp.x1 - 12 || min(p1.x, p2.x) > vp.x2 + 12 ||
+            max(p1.y, p2.y) < vp.y1 - 12 || min(p1.y, p2.y) > vp.y2 + 12) continue;
+
+        if (is_closed) {
+            line_dsc.color = lv_color_hex(0xEF4444); // Crimson Closure
+            line_dsc.width = 6;
+        } else {
+            line_dsc.color = lv_color_hex(0x38BDF8); // Electric Sky / Cyan Active Street
+            line_dsc.width = 7;
+        }
+        lv_draw_line(draw_ctx, &line_dsc, &p1, &p2);
+    }
 }
 
 static void render_map_frame() {
-    // 1. Update Road Polylines
-    for (uint8_t i = 0; i < MAX_ROAD_SEGMENTS; i++) {
-        if (i < active_road_count) {
-            road_points[i][0].x = meters_to_px_x(roads[i].x1);
-            road_points[i][0].y = meters_to_px_y(roads[i].y1);
-            road_points[i][1].x = meters_to_px_x(roads[i].x2);
-            road_points[i][1].y = meters_to_px_y(roads[i].y2);
-            lv_line_set_points(road_lines[i], road_points[i], 2);
+    render_scale_cm_px = current_scale_cm_px;
 
-            if (roads[i].flags & ROAD_FLAG_CLOSED) {
-                lv_obj_set_style_line_color(road_lines[i], lv_color_hex(0xEF4444), 0); // Vivid Crimson Road Closure
-                lv_obj_set_style_line_width(road_lines[i], 4, 0);
-            } else if (roads[i].flags & ROAD_FLAG_CURRENT) {
-                lv_obj_set_style_line_color(road_lines[i], lv_color_hex(0x38BDF8), 0); // Electric Sky / Cyan
-                lv_obj_set_style_line_width(road_lines[i], 5, 0);
-            } else {
-                lv_obj_set_style_line_color(road_lines[i], lv_color_hex(0x334155), 0); // Cool Slate Secondary Road
-                lv_obj_set_style_line_width(road_lines[i], 3, 0);
+    // Legacy 0x01 fallback: if running old un-sorted IPA where closest road is >60m away, center on closest road
+    if (!coords_in_decimeters && active_road_count > 0) {
+        int closest_idx = 0;
+        int32_t best_dsq = 0x7FFFFFFF;
+        for (uint8_t i = 0; i < active_road_count; i++) {
+            int32_t mx = (roads[i].x1 + roads[i].x2) / 2;
+            int32_t my = (roads[i].y1 + roads[i].y2) / 2;
+            int32_t dsq = mx * mx + my * my;
+            if (dsq < best_dsq) {
+                best_dsq = dsq;
+                closest_idx = i;
             }
-            lv_obj_clear_flag(road_lines[i], LV_OBJ_FLAG_HIDDEN);
-        } else {
-            lv_obj_add_flag(road_lines[i], LV_OBJ_FLAG_HIDDEN);
         }
+        if (best_dsq > 60 * 60) {
+            legacy_offset_x = (roads[closest_idx].x1 + roads[closest_idx].x2) / 2;
+            legacy_offset_y = (roads[closest_idx].y1 + roads[closest_idx].y2) / 2;
+        } else {
+            legacy_offset_x = 0;
+            legacy_offset_y = 0;
+        }
+    } else {
+        legacy_offset_x = 0;
+        legacy_offset_y = 0;
     }
+
+    // 1. Trigger custom 3-pass road redraw on circular viewport
+    lv_obj_invalidate(circle_viewport);
 
     // 2. Update POI Icons
     for (uint8_t i = 0; i < MAX_POIS; i++) {
         if (i < active_poi_count) {
-            lv_coord_t px = meters_to_px_x(pois[i].x) - 9;
-            lv_coord_t py = meters_to_px_y(pois[i].y) - 9;
+            lv_coord_t px = coord_to_px_x(pois[i].x) - 9;
+            lv_coord_t py = coord_to_px_y(pois[i].y) - 9;
             lv_obj_set_pos(poi_markers[i], px, py);
 
             const lv_img_dsc_t* icon_src = &icon_fuel_pump;
@@ -494,41 +671,60 @@ static void render_map_frame() {
     }
 }
 
-// Bench Demo Simulation when no iPhone is connected
+// Bench Demo Simulation when no iPhone is connected (Realistic Neighborhood Street Grid)
 static void run_bench_demo() {
     static float sim_t = 0.0f;
     sim_t += 0.035f;
-    int16_t cam_y = static_cast<int16_t>(200 - fmodf(sim_t * 18.0f, 320.0f));
-    float sway = sinf(sim_t * 0.4f) * 22.0f;
+    int16_t scroll_y = static_cast<int16_t>(fmodf(sim_t * 14.0f, 160.0f));
+    float sway = sinf(sim_t * 0.35f) * 14.0f;
 
-    current_scale_cm_px = 150;
-    active_road_count = 4;
+    current_scale_cm_px = 110;
+    coords_in_decimeters = false;
+    uint8_t idx = 0;
 
-    // Main road curving gently ahead
-    roads[0] = {0, -100, static_cast<int16_t>(sway * 0.4f), 80, ROAD_FLAG_CURRENT};
-    roads[1] = {static_cast<int16_t>(sway * 0.4f), 80, static_cast<int16_t>(sway), 250, ROAD_FLAG_CURRENT};
-    // Intersecting cross street
-    roads[2] = {-150, static_cast<int16_t>(cam_y - 25), 150, static_cast<int16_t>(cam_y + 15), 0};
-    // Branch road with road closure (crimson)
-    roads[3] = {static_cast<int16_t>(sway * 0.4f), 80, 160, 140, ROAD_FLAG_CLOSED};
+    // Smoothly curving main avenue (4 segments)
+    int16_t x_m1 = static_cast<int16_t>(-sway * 0.3f);
+    int16_t x_0  = 0;
+    int16_t x_1  = static_cast<int16_t>(sway * 0.4f);
+    int16_t x_2  = static_cast<int16_t>(sway * 0.9f);
+    int16_t x_3  = static_cast<int16_t>(sway * 1.3f);
+    roads[idx++] = {x_m1, -120, x_0, -20, ROAD_FLAG_CURRENT | ROAD_FLAG_MAJOR};
+    roads[idx++] = {x_0,  -20,  x_1, 60,  ROAD_FLAG_CURRENT | ROAD_FLAG_MAJOR};
+    roads[idx++] = {x_1,   60,  x_2, 140, ROAD_FLAG_CURRENT | ROAD_FLAG_MAJOR};
+    roads[idx++] = {x_2,  140,  x_3, 240, ROAD_FLAG_CURRENT | ROAD_FLAG_MAJOR};
 
-    // Rich POI mix on map
+    // Realistic grid of cross streets and parallel neighborhood streets scrolling past
+    for (int b = -1; b <= 2; b++) {
+        int16_t by = static_cast<int16_t>(b * 80 - scroll_y + 60);
+        int16_t cx = static_cast<int16_t>((by > 0) ? (sway * by / 180.0f) : 0);
+        // Cross street left & right
+        roads[idx++] = {-140, static_cast<int16_t>(by - 8), cx, by, (b == 1) ? ROAD_FLAG_MAJOR : static_cast<uint8_t>(0)};
+        roads[idx++] = {cx, by, 140, static_cast<int16_t>(by + 8), (b == 1) ? ROAD_FLAG_MAJOR : static_cast<uint8_t>(0)};
+        // Parallel residential streets left (-65m) and right (+68m)
+        roads[idx++] = {-65, static_cast<int16_t>(by - 80), -65, by, 0};
+        roads[idx++] = {68,  static_cast<int16_t>(by - 80), 68,  by, 0};
+    }
+    // Diagonal side street with roadworks closure
+    int16_t cy_close = static_cast<int16_t>(140 - scroll_y);
+    roads[idx++] = {68, cy_close, 130, static_cast<int16_t>(cy_close + 45), ROAD_FLAG_CLOSED};
+
+    active_road_count = idx;
+
+    // Rich POI mix anchored to the street grid
+    int16_t cam_y = static_cast<int16_t>(140 - scroll_y);
     active_poi_count = 6;
-    pois[0] = {static_cast<int16_t>(sway * 0.5f), cam_y, POI_FIXED_CAM};                     // Speed camera on road ahead
-    pois[1] = {50, static_cast<int16_t>(cam_y - 70), POI_GAS_STATION};                      // Gas station (fuel pump)
-    pois[2] = {-55, static_cast<int16_t>(cam_y + 45), POI_GARAGE};                          // Garage (wrench)
-    pois[3] = {65, static_cast<int16_t>(cam_y + 90), POI_EV_CHARGER};                       // EV charger (lightning)
-    pois[4] = {-60, static_cast<int16_t>(cam_y - 120), POI_PARKING};                        // Parking ("P")
-    pois[5] = {120, 120, POI_CLOSURE_HAZARD};                                               // Hazard on closed road
+    pois[0] = {x_1, cam_y, POI_FIXED_CAM};
+    pois[1] = {-65, static_cast<int16_t>(cam_y - 40), POI_GAS_STATION};
+    pois[2] = {68,  static_cast<int16_t>(cam_y + 35), POI_GARAGE};
+    pois[3] = {-65, static_cast<int16_t>(cam_y + 40), POI_EV_CHARGER};
+    pois[4] = {68,  static_cast<int16_t>(cam_y - 45), POI_PARKING};
+    pois[5] = {98,  static_cast<int16_t>(cy_close + 22), POI_CLOSURE_HAZARD};
 
-    // Calm alert lifecycle:
-    // Alerts only when camera is approaching ahead (lookahead 30..140m)
-    // Tapping dismisses and persists until next loop
-    if (cam_y > 30 && cam_y < 140) {
+    if (cam_y > 25 && cam_y < 125) {
         incoming_alert = ALERT_SPEED_CAM;
     } else {
         incoming_alert = ALERT_NONE;
-        if (cam_y <= 0 || cam_y >= 180) {
+        if (cam_y <= 0 || cam_y >= 135) {
             dismissed_alert = ALERT_NONE;
         }
     }
@@ -540,47 +736,19 @@ static void init_ui() {
     lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(scr, on_viewport_tapped, LV_EVENT_CLICKED, nullptr);
 
-    // 240x240 Circular Viewport Mask (Dark Matter Midnight Slate Void)
+    // 240x240 Circular Viewport Mask (Clean Dark Car/Game Minimap Background)
     circle_viewport = lv_obj_create(scr);
     lv_obj_set_size(circle_viewport, 240, 240);
     lv_obj_set_pos(circle_viewport, VIEWPORT_OFFSET_X, VIEWPORT_OFFSET_Y);
     lv_obj_set_style_radius(circle_viewport, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_clip_corner(circle_viewport, true, 0);
-    lv_obj_set_style_bg_color(circle_viewport, lv_color_hex(0x0A0F1D), 0);
+    lv_obj_set_style_bg_color(circle_viewport, lv_color_hex(0x090D16), 0);
     lv_obj_set_style_border_width(circle_viewport, 2, 0);
     lv_obj_set_style_border_color(circle_viewport, lv_color_hex(0x1E293B), 0);
     lv_obj_set_style_pad_all(circle_viewport, 0, 0);
     lv_obj_clear_flag(circle_viewport, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(circle_viewport, on_viewport_tapped, LV_EVENT_CLICKED, nullptr);
-
-    // Subtle Concentric Distance Guide Rings (Depth & Spatial Scale)
-    lv_obj_t* ring_inner = lv_obj_create(circle_viewport);
-    lv_obj_set_size(ring_inner, 100, 100);
-    lv_obj_set_pos(ring_inner, CAR_CENTER_X - 50, CAR_CENTER_Y - 50);
-    lv_obj_set_style_radius(ring_inner, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_bg_opa(ring_inner, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(ring_inner, 1, 0);
-    lv_obj_set_style_border_color(ring_inner, lv_color_hex(0x152238), 0);
-    lv_obj_set_style_pad_all(ring_inner, 0, 0);
-    lv_obj_clear_flag(ring_inner, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
-
-    lv_obj_t* ring_outer = lv_obj_create(circle_viewport);
-    lv_obj_set_size(ring_outer, 180, 180);
-    lv_obj_set_pos(ring_outer, CAR_CENTER_X - 90, CAR_CENTER_Y - 90);
-    lv_obj_set_style_radius(ring_outer, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_bg_opa(ring_outer, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(ring_outer, 1, 0);
-    lv_obj_set_style_border_color(ring_outer, lv_color_hex(0x152238), 0);
-    lv_obj_set_style_pad_all(ring_outer, 0, 0);
-    lv_obj_clear_flag(ring_outer, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
-
-    // Road Lines Pool
-    for (uint8_t i = 0; i < MAX_ROAD_SEGMENTS; i++) {
-        road_lines[i] = lv_line_create(circle_viewport);
-        lv_obj_set_style_line_rounded(road_lines[i], true, 0);
-        lv_obj_add_flag(road_lines[i], LV_OBJ_FLAG_HIDDEN);
-        lv_obj_clear_flag(road_lines[i], LV_OBJ_FLAG_CLICKABLE);
-    }
+    lv_obj_add_event_cb(circle_viewport, on_viewport_draw, LV_EVENT_DRAW_MAIN, nullptr);
 
     // POI Markers Pool with high-contrast icon badges
     for (uint8_t i = 0; i < MAX_POIS; i++) {
@@ -588,7 +756,7 @@ static void init_ui() {
         lv_obj_set_size(poi_markers[i], 18, 18);
         lv_obj_set_style_radius(poi_markers[i], LV_RADIUS_CIRCLE, 0);
         lv_obj_set_style_border_width(poi_markers[i], 2, 0);
-        lv_obj_set_style_border_color(poi_markers[i], lv_color_hex(0x0A0F1D), 0);
+        lv_obj_set_style_border_color(poi_markers[i], lv_color_hex(0x090D16), 0);
         lv_obj_set_style_pad_all(poi_markers[i], 0, 0);
         lv_obj_clear_flag(poi_markers[i], LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_clear_flag(poi_markers[i], LV_OBJ_FLAG_CLICKABLE);
@@ -601,13 +769,22 @@ static void init_ui() {
         lv_obj_clear_flag(poi_icons[i], LV_OBJ_FLAG_CLICKABLE);
     }
 
-    // Fixed Player Car Chevron (0° Heading-Up, Electric Cyan)
+    // Fixed Player Car Navigation Chevron (0° Heading-Up, Dark Outline + Electric Cyan)
     car_points[0] = {CAR_CENTER_X, CAR_CENTER_Y - 10};
-    car_points[1] = {CAR_CENTER_X + 7, CAR_CENTER_Y + 8};
+    car_points[1] = {CAR_CENTER_X + 8, CAR_CENTER_Y + 8};
     car_points[2] = {CAR_CENTER_X, CAR_CENTER_Y + 3};
-    car_points[3] = {CAR_CENTER_X - 7, CAR_CENTER_Y + 8};
+    car_points[3] = {CAR_CENTER_X - 8, CAR_CENTER_Y + 8};
+    car_points[4] = {CAR_CENTER_X, CAR_CENTER_Y - 10};
+
+    car_shadow = lv_line_create(circle_viewport);
+    lv_line_set_points(car_shadow, car_points, 5);
+    lv_obj_set_style_line_color(car_shadow, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_line_width(car_shadow, 6, 0);
+    lv_obj_set_style_line_rounded(car_shadow, true, 0);
+    lv_obj_clear_flag(car_shadow, LV_OBJ_FLAG_CLICKABLE);
+
     car_icon = lv_line_create(circle_viewport);
-    lv_line_set_points(car_icon, car_points, 4);
+    lv_line_set_points(car_icon, car_points, 5);
     lv_obj_set_style_line_color(car_icon, lv_color_hex(0x00F0FF), 0);
     lv_obj_set_style_line_width(car_icon, 3, 0);
     lv_obj_set_style_line_rounded(car_icon, true, 0);
@@ -740,12 +917,18 @@ void loop() {
     static uint32_t last_serial = 0;
     if (now - last_serial >= 2000) {
         last_serial = now;
-        Serial.printf("[CYD] Mode: %s | Scale: %u cm/px | Alert: %u | Roads: %u, POIs: %u\n",
+        Serial.printf("[CYD] Mode: %s | Scale: %u (render %u) cm/px | Alert: %u | Roads: %u, POIs: %u\n",
                       ble_connected ? "LIVE iPHONE BLE" : "BENCH DEMO SIM",
                       current_scale_cm_px,
+                      render_scale_cm_px,
                       incoming_alert,
                       active_road_count,
                       active_poi_count);
+        if (ble_connected && active_road_count > 0) {
+            Serial.printf("      R0:(%d,%d)->(%d,%d) R1:(%d,%d)->(%d,%d)\n",
+                          roads[0].x1, roads[0].y1, roads[0].x2, roads[0].y2,
+                          roads[1].x1, roads[1].y1, roads[1].x2, roads[1].y2);
+        }
     }
 
     lv_timer_handler();

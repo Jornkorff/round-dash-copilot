@@ -7,3 +7,10 @@ __pycache__/
 .venv/
 .DS_Store
 *.swp
+*.ipa
+tools/AltServer
+tools/sideloader
+tools/plumesign
+tools/Impactor.AppImage
+tools/iloader
+AltServerData/
