@@ -11,7 +11,7 @@
 #define ENABLE_DEBUG_STRIP  1
 
 class LGFX : public lgfx::LGFX_Device {
-    lgfx::Panel_ILI9341 _panel_instance;
+    lgfx::Panel_ST7789  _panel_instance;
     lgfx::Bus_SPI       _bus_instance;
     lgfx::Light_PWM     _light_instance;
     lgfx::Touch_XPT2046 _touch_instance;
@@ -35,7 +35,7 @@ public:
             _bus_instance.config(cfg);
             _panel_instance.setBus(&_bus_instance);
         }
-        // ILI9341 240x320 Panel
+        // ST7789 240x320 Panel (CYD Single USB-C ESP32-WROOM-32E)
         {
             auto cfg = _panel_instance.config();
             cfg.pin_cs           = 15;
@@ -49,7 +49,7 @@ public:
             cfg.offset_y         = 0;
             cfg.offset_rotation  = 0;
             cfg.readable         = true;
-            cfg.invert           = false;
+            cfg.invert           = true;  // ST7789 CYD variants require display color inversion
             cfg.rgb_order        = false;
             cfg.dlen_16bit       = false;
             cfg.bus_shared       = true;
