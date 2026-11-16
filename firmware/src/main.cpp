@@ -402,14 +402,14 @@ static void render_map_frame() {
             lv_line_set_points(road_lines[i], road_points[i], 2);
 
             if (roads[i].flags & ROAD_FLAG_CLOSED) {
-                lv_obj_set_style_line_color(road_lines[i], lv_color_hex(0xE53E3E), 0);
-                lv_obj_set_style_line_width(road_lines[i], 3, 0);
+                lv_obj_set_style_line_color(road_lines[i], lv_color_hex(0xEF4444), 0); // Vivid Crimson Road Closure
+                lv_obj_set_style_line_width(road_lines[i], 4, 0);
             } else if (roads[i].flags & ROAD_FLAG_CURRENT) {
-                lv_obj_set_style_line_color(road_lines[i], lv_color_hex(0xFFFFFF), 0);
+                lv_obj_set_style_line_color(road_lines[i], lv_color_hex(0x38BDF8), 0); // Electric Sky / Cyan
                 lv_obj_set_style_line_width(road_lines[i], 5, 0);
             } else {
-                lv_obj_set_style_line_color(road_lines[i], lv_color_hex(0x4A5568), 0);
-                lv_obj_set_style_line_width(road_lines[i], 2, 0);
+                lv_obj_set_style_line_color(road_lines[i], lv_color_hex(0x334155), 0); // Cool Slate Secondary Road
+                lv_obj_set_style_line_width(road_lines[i], 3, 0);
             }
             lv_obj_clear_flag(road_lines[i], LV_OBJ_FLAG_HIDDEN);
         } else {
@@ -425,43 +425,37 @@ static void render_map_frame() {
             lv_obj_set_pos(poi_markers[i], px, py);
 
             const lv_img_dsc_t* icon_src = &icon_fuel_pump;
-            uint32_t bg_hex = 0x00A389;
+            uint32_t bg_hex = 0x06B6D4;
 
             switch (pois[i].poi_type) {
                 case POI_FIXED_CAM:
-                    bg_hex = 0xE53E3E; // Crimson
-                    icon_src = &icon_camera;
-                    break;
                 case POI_MOBILE_TRAP:
-                    bg_hex = 0xFF2A2A; // Bright Red
-                    icon_src = &icon_camera;
-                    break;
                 case POI_TRAJECTCONTROLE:
-                    bg_hex = 0xC53030; // Dark Red
+                    bg_hex = 0xF43F5E; // Rose Crimson
                     icon_src = &icon_camera;
                     break;
                 case POI_CLOSURE_HAZARD:
-                    bg_hex = 0xDD6B20; // Amber
+                    bg_hex = 0xF59E0B; // Vibrant Amber
                     icon_src = &icon_hazard;
                     break;
                 case POI_GAS_STATION:
-                    bg_hex = 0x00A389; // Teal
+                    bg_hex = 0x06B6D4; // Electric Teal
                     icon_src = &icon_fuel_pump;
                     break;
                 case POI_GARAGE:
-                    bg_hex = 0x4A5568; // Slate Gray
+                    bg_hex = 0x64748B; // Modern Slate
                     icon_src = &icon_wrench;
                     break;
                 case POI_EV_CHARGER:
-                    bg_hex = 0x38A169; // Emerald Green
+                    bg_hex = 0x10B981; // Vivid Emerald
                     icon_src = &icon_ev_charger;
                     break;
                 case POI_PARKING:
-                    bg_hex = 0x3182CE; // Cobalt Blue
+                    bg_hex = 0x3B82F6; // Electric Cobalt
                     icon_src = &icon_parking;
                     break;
                 default:
-                    bg_hex = 0x00A389;
+                    bg_hex = 0x06B6D4;
                     icon_src = &icon_fuel_pump;
                     break;
             }
@@ -484,13 +478,13 @@ static void render_map_frame() {
 
         if (incoming_alert != ALERT_NONE && incoming_alert != dismissed_alert) {
             if (incoming_alert == ALERT_SPEED_CAM) {
-                lv_obj_set_style_bg_color(alert_badge, lv_color_hex(0xE53E3E), 0);
+                lv_obj_set_style_bg_color(alert_badge, lv_color_hex(0xF43F5E), 0);
                 lv_img_set_src(alert_badge_icon, &icon_camera);
             } else if (incoming_alert == ALERT_EMERGENCY) {
-                lv_obj_set_style_bg_color(alert_badge, lv_color_hex(0x3182CE), 0);
+                lv_obj_set_style_bg_color(alert_badge, lv_color_hex(0x3B82F6), 0);
                 lv_img_set_src(alert_badge_icon, &icon_hazard);
             } else {
-                lv_obj_set_style_bg_color(alert_badge, lv_color_hex(0xDD6B20), 0);
+                lv_obj_set_style_bg_color(alert_badge, lv_color_hex(0xF59E0B), 0);
                 lv_img_set_src(alert_badge_icon, &icon_hazard);
             }
             lv_obj_clear_flag(alert_badge, LV_OBJ_FLAG_HIDDEN);
@@ -546,18 +540,39 @@ static void init_ui() {
     lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(scr, on_viewport_tapped, LV_EVENT_CLICKED, nullptr);
 
-    // 240x240 Circular Viewport Mask
+    // 240x240 Circular Viewport Mask (Dark Matter Midnight Slate Void)
     circle_viewport = lv_obj_create(scr);
     lv_obj_set_size(circle_viewport, 240, 240);
     lv_obj_set_pos(circle_viewport, VIEWPORT_OFFSET_X, VIEWPORT_OFFSET_Y);
     lv_obj_set_style_radius(circle_viewport, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_clip_corner(circle_viewport, true, 0);
-    lv_obj_set_style_bg_color(circle_viewport, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_color(circle_viewport, lv_color_hex(0x0A0F1D), 0);
     lv_obj_set_style_border_width(circle_viewport, 2, 0);
-    lv_obj_set_style_border_color(circle_viewport, lv_color_hex(0x2D3748), 0);
+    lv_obj_set_style_border_color(circle_viewport, lv_color_hex(0x1E293B), 0);
     lv_obj_set_style_pad_all(circle_viewport, 0, 0);
     lv_obj_clear_flag(circle_viewport, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(circle_viewport, on_viewport_tapped, LV_EVENT_CLICKED, nullptr);
+
+    // Subtle Concentric Distance Guide Rings (Depth & Spatial Scale)
+    lv_obj_t* ring_inner = lv_obj_create(circle_viewport);
+    lv_obj_set_size(ring_inner, 100, 100);
+    lv_obj_set_pos(ring_inner, CAR_CENTER_X - 50, CAR_CENTER_Y - 50);
+    lv_obj_set_style_radius(ring_inner, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_opa(ring_inner, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(ring_inner, 1, 0);
+    lv_obj_set_style_border_color(ring_inner, lv_color_hex(0x152238), 0);
+    lv_obj_set_style_pad_all(ring_inner, 0, 0);
+    lv_obj_clear_flag(ring_inner, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+
+    lv_obj_t* ring_outer = lv_obj_create(circle_viewport);
+    lv_obj_set_size(ring_outer, 180, 180);
+    lv_obj_set_pos(ring_outer, CAR_CENTER_X - 90, CAR_CENTER_Y - 90);
+    lv_obj_set_style_radius(ring_outer, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_opa(ring_outer, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(ring_outer, 1, 0);
+    lv_obj_set_style_border_color(ring_outer, lv_color_hex(0x152238), 0);
+    lv_obj_set_style_pad_all(ring_outer, 0, 0);
+    lv_obj_clear_flag(ring_outer, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
 
     // Road Lines Pool
     for (uint8_t i = 0; i < MAX_ROAD_SEGMENTS; i++) {
@@ -573,7 +588,7 @@ static void init_ui() {
         lv_obj_set_size(poi_markers[i], 18, 18);
         lv_obj_set_style_radius(poi_markers[i], LV_RADIUS_CIRCLE, 0);
         lv_obj_set_style_border_width(poi_markers[i], 2, 0);
-        lv_obj_set_style_border_color(poi_markers[i], lv_color_hex(0x000000), 0);
+        lv_obj_set_style_border_color(poi_markers[i], lv_color_hex(0x0A0F1D), 0);
         lv_obj_set_style_pad_all(poi_markers[i], 0, 0);
         lv_obj_clear_flag(poi_markers[i], LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_clear_flag(poi_markers[i], LV_OBJ_FLAG_CLICKABLE);
@@ -586,14 +601,14 @@ static void init_ui() {
         lv_obj_clear_flag(poi_icons[i], LV_OBJ_FLAG_CLICKABLE);
     }
 
-    // Fixed Player Car Chevron (0° Heading-Up)
+    // Fixed Player Car Chevron (0° Heading-Up, Electric Cyan)
     car_points[0] = {CAR_CENTER_X, CAR_CENTER_Y - 10};
     car_points[1] = {CAR_CENTER_X + 7, CAR_CENTER_Y + 8};
     car_points[2] = {CAR_CENTER_X, CAR_CENTER_Y + 3};
     car_points[3] = {CAR_CENTER_X - 7, CAR_CENTER_Y + 8};
     car_icon = lv_line_create(circle_viewport);
     lv_line_set_points(car_icon, car_points, 4);
-    lv_obj_set_style_line_color(car_icon, lv_color_hex(0x00E5FF), 0);
+    lv_obj_set_style_line_color(car_icon, lv_color_hex(0x00F0FF), 0);
     lv_obj_set_style_line_width(car_icon, 3, 0);
     lv_obj_set_style_line_rounded(car_icon, true, 0);
     lv_obj_clear_flag(car_icon, LV_OBJ_FLAG_CLICKABLE);
