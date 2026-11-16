@@ -1,10 +1,12 @@
 #pragma once
-#include <LovyanGFX.hpp>
 
 #if defined(TARGET_CYD)
 
-#define SCREEN_WIDTH        240
-#define SCREEN_HEIGHT       320
+#include <LovyanGFX.hpp>
+
+#define SCREEN_WIDTH        320
+#define SCREEN_HEIGHT       240
+#define VIEWPORT_OFFSET_X   40
 #define VIEWPORT_OFFSET_Y   0
 #define ENABLE_DEBUG_STRIP  1
 
@@ -16,6 +18,7 @@ class LGFX : public lgfx::LGFX_Device {
 
 public:
     LGFX(void) {
+        // Display SPI Bus (HSPI / SPI2)
         {
             auto cfg = _bus_instance.config();
             cfg.spi_host   = HSPI_HOST;
@@ -32,20 +35,27 @@ public:
             _bus_instance.config(cfg);
             _panel_instance.setBus(&_bus_instance);
         }
+        // ILI9341 240x320 Panel
         {
             auto cfg = _panel_instance.config();
             cfg.pin_cs           = 15;
             cfg.pin_rst          = -1;
             cfg.pin_busy         = -1;
+            cfg.memory_width     = 240;
+            cfg.memory_height    = 320;
             cfg.panel_width      = 240;
             cfg.panel_height     = 320;
+            cfg.offset_x         = 0;
+            cfg.offset_y         = 0;
             cfg.offset_rotation  = 0;
             cfg.readable         = true;
             cfg.invert           = false;
             cfg.rgb_order        = false;
-            cfg.bus_shared       = false;
+            cfg.dlen_16bit       = false;
+            cfg.bus_shared       = true;
             _panel_instance.config(cfg);
         }
+        // Backlight PWM on GPIO 21
         {
             auto cfg = _light_instance.config();
             cfg.pin_bl      = 21;
@@ -55,21 +65,20 @@ public:
             _light_instance.config(cfg);
             _panel_instance.setLight(&_light_instance);
         }
+        // Resistive Touch XPT2046 on dedicated software SPI
         {
             auto cfg = _touch_instance.config();
-            cfg.x_min       = 300;
-            cfg.x_max       = 3900;
-            cfg.y_min       = 200;
-            cfg.y_max       = 3700;
-            cfg.pin_int     = 36;
-            cfg.bus_shared  = false;
-            cfg.offset_rotation = 0;
-            cfg.spi_host    = VSPI_HOST;
-            cfg.freq        = 1000000;
-            cfg.pin_sclk    = 25;
-            cfg.pin_mosi    = 32;
-            cfg.pin_miso    = 39;
-            cfg.pin_cs      = 33;
+            cfg.x_min      = 300;
+            cfg.x_max      = 3900;
+            cfg.y_min      = 3700;
+            cfg.y_max      = 200;
+            cfg.pin_int    = -1;
+            cfg.bus_shared = false;
+            cfg.spi_host   = -1; // Software SPI
+            cfg.pin_sclk   = 25;
+            cfg.pin_mosi   = 32;
+            cfg.pin_miso   = 39;
+            cfg.pin_cs     = 33;
             _touch_instance.config(cfg);
             _panel_instance.setTouch(&_touch_instance);
         }
@@ -79,8 +88,11 @@ public:
 
 #elif defined(TARGET_WAVESHARE_S3)
 
+#include <LovyanGFX.hpp>
+
 #define SCREEN_WIDTH        240
 #define SCREEN_HEIGHT       240
+#define VIEWPORT_OFFSET_X   0
 #define VIEWPORT_OFFSET_Y   0
 #define ENABLE_DEBUG_STRIP  0
 

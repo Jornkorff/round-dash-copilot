@@ -19,7 +19,10 @@ enum PoiType : uint8_t {
     POI_MOBILE_TRAP     = 2,
     POI_TRAJECTCONTROLE = 3,
     POI_CLOSURE_HAZARD  = 4,
-    POI_GAS_STATION     = 5
+    POI_GAS_STATION     = 5,
+    POI_GARAGE          = 6,
+    POI_EV_CHARGER      = 7,
+    POI_PARKING         = 8
 };
 
 enum RoadFlags : uint8_t {

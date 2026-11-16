@@ -8,11 +8,14 @@ enum AlertTier: UInt8 {
 }
 
 enum PoiType: UInt8 {
-    case fixedCam       = 1
-    case mobileTrap     = 2
+    case fixedCam        = 1
+    case mobileTrap      = 2
     case trajectcontrole = 3
-    case closureHazard  = 4
-    case gasStation     = 5
+    case closureHazard   = 4
+    case gasStation      = 5
+    case garage          = 6
+    case evCharger       = 7
+    case parking         = 8
 }
 
 struct RoadSegment {
